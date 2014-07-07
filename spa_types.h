@@ -10,7 +10,7 @@
 
 // system macros
 #define MAX_DIMENSION 3
-
+#define INF 9e20
 // verbose level
 #define QUIET 0
 #define SHORT 1
@@ -24,6 +24,21 @@
 #define HOMO_MAJOR 0
 #define HOMO_MINOR 2
 #define HETER 1
+
+// dimension
+#define PLANE 2
+#define GLOBE 3
+
+// generation
+#define SELF 1
+#define PARENT 2
+
+// program mode
+#define COEF_ONLY 1
+#define LOCT_ONLY 2
+#define BOTH 3
+#define LOCT_GLOBE 4
+#define ADMIXED 5
 
 struct spa_parameter {
   
@@ -77,10 +92,12 @@ struct spa_model {
   snp_info_struct* snp_info;
   individual_info_struct* individual_info;
   
+  double** coef_q;
   double** coef_a;
   double* coef_b;
   double** x;
 
+  double* coef_q_space;
   double* coef_a_space;
   double* x_space;
 
