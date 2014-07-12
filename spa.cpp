@@ -296,13 +296,17 @@ void spa_sub_optimize(spa_model *model,
   double a_hess[MAX_DIMENSION * MAX_DIMENSION];
   double b_grad;
   double b_hess;
+  double q_grad;
+  double q_hess;
   double gradproj[MAX_DIMENSION];
 
 
-  double ad[MAX_DIMENSION], bd;
+  double ad[MAX_DIMENSION], bd, qd;
   double atmp[MAX_DIMENSION], htmp[MAX_DIMENSION * MAX_DIMENSION];
   double *pt;
   double pb;
+  double pq;
+  double xsqrd;
 
   double f, lambda, t, obj, objt, bound;
 
@@ -310,19 +314,23 @@ void spa_sub_optimize(spa_model *model,
     // optimize a[i] b[i] 
     pt = model->coef_a[i];
     pb = model->coef_b[i];
+    pq = model->coef_q[i];
     for(iter = 0; iter < param->max_sub_iter; iter++) {  
       vector_init(a_grad, param->dimension, 0); 
       vector_init(a_hess, param->dimension*param->dimension, 0); 
 
       b_grad = 0;
       b_hess = 0;
+      q_grad = 0;
+      q_hess = 0;
       
       // compute gradient and Hessian
       for(j = 0; j < geno->n_individual; j++) {
+        xsqrd = vector_inner_product(model->x[j], model->x[j], param->dimension);
         f = 1 / (1 + exp(- vector_inner_product(model->coef_a[i],
                                                 model->x[j],
                                                 param->dimension) 
-                         - model->coef_b[i]));
+                         - model->coef_b[i] - (model->coef_q[i] * xsqrd)));
 
         vector_out_product(htmp, model->x[j], param->dimension);
 
@@ -330,14 +338,17 @@ void spa_sub_optimize(spa_model *model,
           case HOMO_MAJOR:
             vector_add(a_grad, model->x[j], 2*f, param->dimension);
             b_grad += 2*f; 
+            q_grad += 2*f*xsqrd;
             break;
           case HETER:
             vector_add(a_grad, model->x[j], -1+2*f, param->dimension);
             b_grad += -1+2*f;
+            q_grad += (-1+2*f)*xsqrd;
             break;
           case HOMO_MINOR:
             vector_add(a_grad, model->x[j], -2+2*f, param->dimension);
             b_grad += -2+2*f;
+            q_grad += (-2+2*f)*xsqrd;
             break;
           default:
             break;
@@ -345,6 +356,7 @@ void spa_sub_optimize(spa_model *model,
 
         vector_add(a_hess, htmp, 2*f*(1-f), param->dimension*param->dimension);
         b_hess += 2*f*(1-f);
+        q_hess += (2*f*(1-f)) * (xsqrd * xsqrd);
       }
       
       // test termination
@@ -352,13 +364,20 @@ void spa_sub_optimize(spa_model *model,
       lusolv(a_hess, param->dimension, ad, param);
       vector_scale(ad, -1, param->dimension);
 
+      // step directions for b and q
       if(b_hess > 0) {
         bd = - b_grad / b_hess;
       } else {
         bd = - b_grad;
       }
+
+      if(q_hess > 0) {
+        qd = - q_grad / q_hess;
+      } else {
+        qd = - q_grad;
+      }
       lambda = (- vector_inner_product(a_grad, ad, param->dimension) 
-                - bd * b_grad) 
+                - bd * b_grad - qd * q_grad) 
                / geno->n_individual;
       
       if(lambda < param->epsilon)
@@ -376,25 +395,28 @@ void spa_sub_optimize(spa_model *model,
       model->coef_a[i] = atmp;
       vector_add_to_new(atmp, pt, ad, t, param->dimension);
       model->coef_b[i] = pb + bd * t;
+      model->coef_q[i] = pq + qd * t;
       
       objt = spa_sub_objective(model, geno, param, i, COEF_ONLY);
       bound = obj + param->alpha * t *
                     (vector_inner_product(a_grad, ad, param->dimension) + 
-                     bd * b_grad);
+                     bd * b_grad + qd * q_grad);
 
       while(objt > bound) {
         t = t * param->beta;
         vector_add_to_new(atmp, pt, ad, t, param->dimension);
         model->coef_b[i] = pb + bd * t;
+        model->coef_q[i] = pq + bd * t;
         objt = spa_sub_objective(model, geno, param, i, COEF_ONLY);
         bound = obj + param->alpha * t * 
                       (vector_inner_product(a_grad, ad, param->dimension) + 
-                       bd * b_grad);
+                       bd * b_grad + qd * q_grad);
       }
 
       vector_copy(pt, atmp, param->dimension);
       model->coef_a[i] = pt;
       pb = model->coef_b[i];
+      pq = model->coef_q[i];
 
       sprintf(line, 
               "Iter %d: objective = %.10f, gradient norm = %.10f",
@@ -588,15 +610,16 @@ double spa_sub_objective(const spa_model *model,
                          int mode) {
   int j;
   double objective = 0.0;
-  double f, f1, f2;
+  double f, f1, f2, xsqrd;
 
   if(mode == COEF_ONLY) { 
     // for a[i] 
     for(j = 0; j < geno->n_individual; j++) {
+      xsqrd = vector_inner_product(model->x[j], model->x[j], param->dimension);
       f = vector_inner_product(model->coef_a[i],
                                model->x[j],
                                param->dimension) + 
-          model->coef_b[i];
+          model->coef_b[i] + (model->coef_q[i] * xsqrd);
 
       f1 = log(1 + exp(f));
       f2 = log(1 + exp(-f));
@@ -618,10 +641,11 @@ double spa_sub_objective(const spa_model *model,
   } else if(mode == LOCT_ONLY) {
     // for x[i] 
     for(j = 0; j < geno->n_snp; j++) {
+      xsqrd = vector_inner_product(model->x[i], model->x[i], param->dimension);
       f = vector_inner_product(model->coef_a[j],
                                model->x[i],
                                param->dimension) + 
-          model->coef_b[j];
+          model->coef_b[j] + (model->coef_q[j] * xsqrd);
      
       f1 = log(1 + exp(f));
       f2 = log(1 + exp(-f));
@@ -1418,21 +1442,13 @@ void allocate_model_x(spa_model *model,
 void allocate_model_coef(spa_model *model,
                          const spa_parameter* param) {
   int i;
-  model->coef_q_space = Malloc(double, model->n_snp * param->dimension * param->dimension);
-  model->coef_q = Malloc(double*, model->n_snp);
-  for(i = 0; i < model->n_snp; i++) {
-    model->coef_q[i] = &(model->coef_q_space[i * param->dimension * param->dimension]);
-  }
-
   model->coef_a_space = Malloc(double, model->n_snp * param->dimension);
   model->coef_a = Malloc(double*, model->n_snp);
   for(i = 0; i < model->n_snp; i++) {
     model->coef_a[i] = &(model->coef_a_space[i * param->dimension]);
   }
-
   model->coef_b = Malloc(double, model->n_snp);
   model->score = Malloc(double, model->n_snp);
-  vector_init(model->coef_q_space, model->n_snp * param->dimension * param->dimension, 0);  
   vector_init(model->coef_a_space, model->n_snp * param->dimension, 0);  
   vector_init(model->coef_b, model->n_snp, 0);
   
@@ -1450,10 +1466,8 @@ void allocate_model_for_bootstrap(spa_model *model,
 void free_model(const spa_model *model) {
   int i;
 
-  free(model->coef_q_space);
   free(model->coef_a_space);
   free(model->x_space);
-  free(model->coef_q);
   free(model->coef_a);
   free(model->coef_b);
   free(model->x);

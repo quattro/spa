@@ -92,12 +92,11 @@ struct spa_model {
   snp_info_struct* snp_info;
   individual_info_struct* individual_info;
   
-  double** coef_q;
   double** coef_a;
   double* coef_b;
+  double* coef_q;
   double** x;
 
-  double* coef_q_space;
   double* coef_a_space;
   double* x_space;
 
