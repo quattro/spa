@@ -291,6 +291,7 @@ void spa_sub_optimize(spa_model *model,
                       const int i,
                       const int mode) {
   int j;
+  int k;
   int iter;
   double a_grad[MAX_DIMENSION];
   double a_hess[MAX_DIMENSION * MAX_DIMENSION];
@@ -427,7 +428,7 @@ void spa_sub_optimize(spa_model *model,
     }
   } else if (mode == LOCT_ONLY) {
     pt = model->x[i];
-  
+    xsqrd = vector_inner_product(model->x[i], model->x[i], param->dimension);
     for(iter = 0; iter < param->max_sub_iter; iter++) {
       vector_init(a_grad, param->dimension, 0); 
       vector_init(a_hess, param->dimension*param->dimension, 0); 
@@ -435,25 +436,48 @@ void spa_sub_optimize(spa_model *model,
       // compute a_gradient and hessian
       for(j = 0; j < geno->n_snp; j++) {
         f = 1 / (1 + exp(- vector_inner_product(model->coef_a[j],
-                                                model->x[i], 
-                                                param->dimension)
-                         - model->coef_b[j]));
-         
-        vector_out_product(htmp, model->coef_a[j], param->dimension);
+                                                model->x[i],
+                                                param->dimension) 
+                         - model->coef_b[j] - (model->coef_q[j] * xsqrd)));
+
+        vector_add_to_new(atmp, model->coef_a[j], model->x[i], 2 * model->coef_q[j], param->dimension);
+        vector_out_product(htmp, atmp, param->dimension);
 
         switch(get_genotype(geno->genotype, i, j)) {
           case HOMO_MAJOR:
-            vector_add(a_grad, model->coef_a[j], 2*f, param->dimension);
+            vector_add(a_grad,
+                    atmp,
+                    2*f*2,
+                    param->dimension);
             break;
           case HETER:
-            vector_add(a_grad, model->coef_a[j], -1+2*f, param->dimension);
+            vector_add(a_grad,
+                    atmp,
+                    -1+2*f,
+                    param->dimension);
             break;
           case HOMO_MINOR:
-            vector_add(a_grad, model->coef_a[j], -2+2*f, param->dimension);
+            vector_add(a_grad,
+                    atmp,
+                    -2+2*f,
+                    param->dimension);
             break;
         }
 
         vector_add(a_hess, htmp, 2*f*(1-f), param->dimension*param->dimension);
+        for (k = 0; k < param->dimension; k++) {
+            switch(get_genotype(geno->genotype, i, j)) {
+                case HOMO_MAJOR:
+                    a_hess[k*param->dimension + k] += -4*f*model->coef_q[j];
+                    break;
+                case HETER:
+                    a_hess[k*param->dimension + k] += (1-2*f)*2*model->coef_q[j];
+                    break;
+                case HOMO_MINOR:
+                    a_hess[k*param->dimension + k] += (2-2*f)*2*model->coef_q[j];
+                    break;
+            }
+        }
       }
 
       // test termination
@@ -826,7 +850,13 @@ void spa_sub_optimize_admixed(spa_model *model,
 void lusolv(double *a, int n, double *b, const spa_parameter *param)
 {
   int d;
+  int i, j;
   int flag;
+  double htmp[MAX_DIMENSION * MAX_DIMENSION];
+  double norm;
+  double tau;
+  double minval;
+  double val;
 
   flag = ludcmp(a, n, indx, &d);
 
@@ -834,6 +864,41 @@ void lusolv(double *a, int n, double *b, const spa_parameter *param)
     // if singular, just use gradient
     lubksb(a, n, indx, b);
   } else {
+    // algorithm 6.3 from Numerical Opt Nocedal,Wright 1999
+    norm = 0.0;
+    minval = 1e37;
+    for (i = 0; i < n; i++) {
+        for (j = 0; j < n; j++) {
+            val = a[i*n + j];
+            norm += val * val;
+            if (val < minval)
+                minval = val;
+            if (i == j) {
+                htmp[i*n + i] = 1.0;
+            } else {
+                htmp[i*n + i] = 0.0;
+            }
+        }
+    }
+    if (minval > 0.0) {
+        tau = 0.0;
+    } else {
+        tau = minval;
+    }
+    while (true) {
+        vector_add(a, htmp, tau, n * n);
+        flag = ludcmp(a, n, indx, &d);
+        if (flag) {
+            lubksb(a, n, indx, b);
+            break;
+        }
+        if ( 2 * tau > norm / 2.0) {
+            tau = 2 * tau;
+        } else {
+            tau = norm / 2.0;
+        }
+    }
+    vector_copy(a, htmp, n * n);
     spa_message("singular hessian! Switch to gradient descent", WORDY, param);
   }
 }

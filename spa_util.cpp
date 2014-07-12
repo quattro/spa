@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <limits>
 
 #define MAX_DIMENSION 3
 #define TINY 1.0e-20
