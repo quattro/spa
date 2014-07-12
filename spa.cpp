@@ -475,13 +475,13 @@ void spa_sub_optimize(spa_model *model,
         for (k = 0; k < param->dimension; k++) {
             switch(get_genotype(geno->genotype, i, j)) {
                 case HOMO_MAJOR:
-                    a_hess[k*param->dimension + k] += -4*f*model->coef_q[j];
+                    a_hess[k*param->dimension + k] -= -4*f*model->coef_q[j];
                     break;
                 case HETER:
-                    a_hess[k*param->dimension + k] += (1-2*f)*2*model->coef_q[j];
+                    a_hess[k*param->dimension + k] -= (1-2*f)*2*model->coef_q[j];
                     break;
                 case HOMO_MINOR:
-                    a_hess[k*param->dimension + k] += (2-2*f)*2*model->coef_q[j];
+                    a_hess[k*param->dimension + k] -= (2-2*f)*2*model->coef_q[j];
                     break;
             }
         }
