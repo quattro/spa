@@ -174,7 +174,7 @@ int main (int argc, char** argv)  {
   } else if(param.ilfile) {
     data_sanity_check(&geno);
     read_location_ilfile(param.ilfile, &model, &param); 
-    spa_message("Individual locatioins are given ...", SHORT, &param);
+    spa_message("Individual locations are given ...", SHORT, &param);
     // make sure the model and genotype data have the same number of
     // individuals, by the same order
     model_data_consistent(&model, &geno, &param, LOCT_ONLY);
@@ -219,6 +219,7 @@ void spa_optimize(spa_model *model,
     old_x = Malloc(double, geno->n_individual * param->dimension);
   
     for(iter = 0; iter < param->max_iter; iter++) {
+      #pragma parallel for private(i) num_threads(model->num_threads)
       for(i = 0; i < geno->n_snp; i++) {
         spa_sub_optimize(model, geno, param, i, COEF_ONLY);
       }
@@ -230,6 +231,7 @@ void spa_optimize(spa_model *model,
                                   old_x, 
                                   geno->n_individual * param->dimension));
   
+      #pragma parallel for private(i) num_threads(model->num_threads)
       for(i = 0; i < geno->n_individual; i++) {
         switch(param->dimension) {
           case PLANE:
@@ -268,6 +270,7 @@ void spa_optimize(spa_model *model,
     }
   } else if (mode == LOCT_ONLY) {
     initialize_random_location(model, geno, param);    
+    #pragma parallel for private(i) num_threads(model->num_threads)
     for(i = 0; i < geno->n_individual; i++) {
       switch(param->dimension) {
         case PLANE:
@@ -875,9 +878,9 @@ void lusolv(double *a, int n, double *b, const spa_parameter *param)
         for (j = 0; j < n; j++) {
             val = a[i*n + j];
             norm += val * val;
-            if (val < minval)
-                minval = val;
             if (i == j) {
+                if (val < minval)
+                    minval = val;
                 htmp[i*n + i] = 1.0;
             } else {
                 htmp[i*n + i] = 0.0;
