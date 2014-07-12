@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <omp.h>
 
 using std::string;
 using std::map;
@@ -41,6 +42,7 @@ void exit_with_help() {
   "-r tradeoff : set optimization epsilon tolerance (default 1e-6)."
     "Larger value makes the program run faster but poor accuracy\n"
   "-v verbose : verbose level\n"
+  "-t thread_num : number of thread\n"
   );
   exit(1);
 }
@@ -99,6 +101,7 @@ void set_default_parameter(spa_parameter *param) {
   param->beta = 0.5;
   param->epsilon = 1e-6;
   param->verbose = SHORT;
+  param->thread_num = 1;
 
   param->large_step_since = 15;
 }
@@ -259,6 +262,7 @@ void spa_optimize(spa_model *model,
   
     free(old_x);
   } else if (mode == COEF_ONLY)  {
+    #pragma parallel for private(i) num_threads(model->num_threads)
     for(i = 0; i < geno->n_snp; i++) {
       spa_sub_optimize(model, geno, param, i, COEF_ONLY);
     }
@@ -407,7 +411,7 @@ void spa_sub_optimize(spa_model *model,
         t = t * param->beta;
         vector_add_to_new(atmp, pt, ad, t, param->dimension);
         model->coef_b[i] = pb + bd * t;
-        model->coef_q[i] = pq + bd * t;
+        model->coef_q[i] = pq + qd * t;
         objt = spa_sub_objective(model, geno, param, i, COEF_ONLY);
         bound = obj + param->alpha * t * 
                       (vector_inner_product(a_grad, ad, param->dimension) + 
@@ -1000,6 +1004,9 @@ void parse_input_parameters(int argc,
         break;
       case 'v':
         param->verbose = atoi(argv[i]);
+        break;
+      case 't':
+        param->thread_num = atoi(argv[i]);
         break;
       case 'r':
         param->epsilon = atof(argv[i]);

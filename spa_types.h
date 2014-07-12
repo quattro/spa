@@ -63,6 +63,7 @@ struct spa_parameter {
   double beta;
 
   int verbose;
+  int thread_num;
 
   int large_step_since;
 };
