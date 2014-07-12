@@ -6,7 +6,7 @@ LDFLAGS = -O3
 
 all: spa_run
 
-IPATH = spa/cpp
+IPATH = ./
 
 spa.o: spa.cpp spa.h spa_util.h spa_io.h spa_types.h
 	$(CC) -I$(IPATH) -c $(CFLAGS) spa.cpp

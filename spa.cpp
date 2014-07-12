@@ -842,16 +842,18 @@ void spa_selection(const spa_model *model,
                    const spa_parameter *param) {
   int i, j;
   double *tmp;
+  double xsqrd;
 
   tmp = Malloc(double, model->n_individual);
 
   for(i = 0; i < model->n_snp; i++) {
     for(j = 0; j < model->n_individual; j++) {
-      tmp[j] = 
-        1 / (1 + exp(- vector_inner_product(model->coef_a[i], 
-                                            model->x[j],
-                                            param->dimension) 
-                     - model->coef_b[i]));
+      xsqrd = vector_inner_product(model->x[j], model->x[j], param->dimension);
+      tmp[j] =
+          1 / (1 + exp(- vector_inner_product(model->coef_a[i],
+                                                model->x[j],
+                                                param->dimension) 
+                         - model->coef_b[i] - (model->coef_q[i] * xsqrd)));
     }
     model->score[i] = vector_std(tmp, model->n_individual);
   }
@@ -1448,10 +1450,11 @@ void allocate_model_coef(spa_model *model,
     model->coef_a[i] = &(model->coef_a_space[i * param->dimension]);
   }
   model->coef_b = Malloc(double, model->n_snp);
+  model->coef_q = Malloc(double, model->n_snp);
   model->score = Malloc(double, model->n_snp);
   vector_init(model->coef_a_space, model->n_snp * param->dimension, 0);  
   vector_init(model->coef_b, model->n_snp, 0);
-  
+  vector_init(model->coef_q, model->n_snp, 0);
 }
 
 void allocate_model_for_bootstrap(spa_model *model,
@@ -1461,6 +1464,7 @@ void allocate_model_for_bootstrap(spa_model *model,
   
   vector_init(model->coef_a_space, model->n_snp * param->dimension, 0);
   vector_init(model->coef_b, model->n_snp, 0);
+  vector_init(model->coef_q, model->n_snp, 0);
 }
 
 void free_model(const spa_model *model) {
@@ -1470,6 +1474,7 @@ void free_model(const spa_model *model) {
   free(model->x_space);
   free(model->coef_a);
   free(model->coef_b);
+  free(model->coef_q);
   free(model->x);
   free(model->score);
 

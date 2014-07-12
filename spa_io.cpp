@@ -848,6 +848,7 @@ void write_model_omfile(const char* filename,
       fprintf(fp, "%.10f\t", model->coef_a[i][j]);
     }
     fprintf(fp, "%.10f\t", model->coef_b[i]);
+    fprintf(fp, "%.10f\t", model->coef_q[i]);
     fprintf(fp, "%.10f\n", model->score[i]);
   }
   fclose(fp);
