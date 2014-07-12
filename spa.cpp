@@ -860,6 +860,7 @@ void lusolv(double *a, int n, double *b, const spa_parameter *param)
   int i, j;
   int flag;
   double htmp[MAX_DIMENSION * MAX_DIMENSION];
+  double I[MAX_DIMENSION * MAX_DIMENSION];
   double norm;
   double tau;
   double minval;
@@ -872,6 +873,7 @@ void lusolv(double *a, int n, double *b, const spa_parameter *param)
     lubksb(a, n, indx, b);
   } else {
     // algorithm 6.3 from Numerical Opt Nocedal,Wright 1999
+    eye(I, n);
     norm = 0.0;
     minval = 1e37;
     for (i = 0; i < n; i++) {
@@ -893,7 +895,9 @@ void lusolv(double *a, int n, double *b, const spa_parameter *param)
         tau = minval;
     }
     while (true) {
-        vector_add(a, htmp, tau, n * n);
+        vector_add(htmp, I, tau, n * n);
+        vector_add(a, htmp, 1.0, n * n);
+
         flag = ludcmp(a, n, indx, &d);
         if (flag) {
             lubksb(a, n, indx, b);

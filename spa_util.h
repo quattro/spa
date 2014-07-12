@@ -15,6 +15,9 @@ int ludcmp(double* a, int n, int* indx, int* d);
  * vector operation functions
  * */
 
+// set identity matrix
+void eye(double *x, int n);
+
 // x = x + factor * y
 void vector_add(double* x, double* y, double factor, int n);
 // z = x + factor * y

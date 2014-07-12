@@ -137,6 +137,19 @@ void vector_init(double *x, int n, double v) {
   }
 }
 
+void eye(double *x, int n) {
+  int i;
+  int j;
+  for(i = 0; i < n; i++) {
+    for(j = 0; j < n; j++) {
+        if (i == j)
+            x[i*n + j] = 1.0;
+        else
+            x[i*n + j] = 0.0;
+    }
+  }
+}
+
 double vector_inner_product(double *x, double *y, int n) {
   double prod = 0;
   int i;
