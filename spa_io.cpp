@@ -9,7 +9,7 @@
 
 #define LOC_FILE_HEADER 6
 #define MODEL_FILE_HEADER 4
-#define MODEL_FILE_TAILER 4 
+#define MODEL_FILE_TAILER 5 
 #define BIM 6
 #define SPA_MODEL 66
 #define MAP 4
@@ -801,6 +801,7 @@ void read_model_imfile(const char* filename,
     model->coef_a[i] = &(model->coef_a_space[i * param->dimension]);
   }
   model->coef_b = Malloc(double, rows);
+  model->coef_q = Malloc(double, rows);
 
   rewind(fp);
 
@@ -814,6 +815,7 @@ void read_model_imfile(const char* filename,
       }
       
       model->coef_b[i] = atof(strtok(NULL, " \t\n"));
+      model->coef_q[i] = atof(strtok(NULL, " \t\n"));
       model->score[i] = atof(strtok(NULL, " \t\n"));
     }
   } else {

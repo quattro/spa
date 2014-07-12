@@ -1,7 +1,7 @@
 CC = g++
 LD = g++
 
-CFLAGS = -O3 -fopenmp 
+CFLAGS = -O3 -fopenmp
 LDFLAGS = -O3 -fopenmp
 
 all: spa_run
