@@ -235,6 +235,7 @@ void spa_optimize(spa_model *model,
       for(i = 0; i < geno->n_individual; i++) {
         switch(param->dimension) {
           case PLANE:
+              printf("%d\n", i);
             spa_sub_optimize(model, geno, param, i, LOCT_ONLY);
             break;
           case GLOBE:
@@ -266,6 +267,7 @@ void spa_optimize(spa_model *model,
   } else if (mode == COEF_ONLY)  {
     #pragma parallel for private(i) num_threads(model->num_threads)
     for(i = 0; i < geno->n_snp; i++) {
+      printf("%d\n", i);
       spa_sub_optimize(model, geno, param, i, COEF_ONLY);
     }
   } else if (mode == LOCT_ONLY) {
@@ -314,15 +316,13 @@ void spa_sub_optimize(spa_model *model,
   double *pt;
   double pb;
   double pq;
-  double xsqrd;
+  double xsqrd, g_coef, h_coef;
 
   double f, lambda, t, obj, objt, bound;
 
   if(mode == COEF_ONLY) {
-    // optimize a[i] b[i] 
+    // optimize q[i] a[i] b[i] 
     pt = model->coef_a[i];
-    pb = model->coef_b[i];
-    pq = model->coef_q[i];
     for(iter = 0; iter < param->max_sub_iter; iter++) {  
       vector_init(a_grad, param->dimension, 0); 
       vector_init(a_hess, param->dimension*param->dimension, 0); 
@@ -341,30 +341,28 @@ void spa_sub_optimize(spa_model *model,
                          - model->coef_b[i] - (model->coef_q[i] * xsqrd)));
 
         vector_out_product(htmp, model->x[j], param->dimension);
-
         switch(get_genotype(geno->genotype, j, i)) {
           case HOMO_MAJOR:
-            vector_add(a_grad, model->x[j], 2*f, param->dimension);
-            b_grad += 2*f; 
-            q_grad += 2*f*xsqrd;
+            g_coef = 2*f;
             break;
           case HETER:
-            vector_add(a_grad, model->x[j], -1+2*f, param->dimension);
-            b_grad += -1+2*f;
-            q_grad += (-1+2*f)*xsqrd;
+            g_coef = -1+2*f;
             break;
           case HOMO_MINOR:
-            vector_add(a_grad, model->x[j], -2+2*f, param->dimension);
-            b_grad += -2+2*f;
-            q_grad += (-2+2*f)*xsqrd;
+            g_coef = -2+2*f;
             break;
           default:
             break;
         }
 
-        vector_add(a_hess, htmp, 2*f*(1-f), param->dimension*param->dimension);
-        b_hess += 2*f*(1-f);
-        q_hess += (2*f*(1-f)) * (xsqrd * xsqrd);
+        vector_add(a_grad, model->x[j], g_coef, param->dimension);
+        b_grad += g_coef;
+        q_grad += g_coef*xsqrd;
+
+        h_coef = 2 * f * (1 - f);
+        vector_add(a_hess, htmp, h_coef, param->dimension*param->dimension);
+        b_hess += h_coef;
+        q_hess += h_coef * (xsqrd * xsqrd);
       }
       
       // test termination
@@ -402,6 +400,8 @@ void spa_sub_optimize(spa_model *model,
 
       model->coef_a[i] = atmp;
       vector_add_to_new(atmp, pt, ad, t, param->dimension);
+      pb = model->coef_b[i];
+      pq = model->coef_q[i];
       model->coef_b[i] = pb + bd * t;
       model->coef_q[i] = pq + qd * t;
       
@@ -423,8 +423,6 @@ void spa_sub_optimize(spa_model *model,
 
       vector_copy(pt, atmp, param->dimension);
       model->coef_a[i] = pt;
-      pb = model->coef_b[i];
-      pq = model->coef_q[i];
 
       sprintf(line, 
               "Iter %d: objective = %.10f, gradient norm = %.10f",
@@ -452,38 +450,30 @@ void spa_sub_optimize(spa_model *model,
 
         switch(get_genotype(geno->genotype, i, j)) {
           case HOMO_MAJOR:
-            vector_add(a_grad,
-                    atmp,
-                    2*f*2,
-                    param->dimension);
+            g_coef = 2*f;
             break;
           case HETER:
-            vector_add(a_grad,
-                    atmp,
-                    -1+2*f,
-                    param->dimension);
+            g_coef = -1+2*f;
             break;
           case HOMO_MINOR:
-            vector_add(a_grad,
-                    atmp,
-                    -2+2*f,
-                    param->dimension);
+            g_coef = -2+2*f;
             break;
         }
-
+        vector_add(a_grad, atmp, g_coef, param->dimension);
         vector_add(a_hess, htmp, 2*f*(1-f), param->dimension*param->dimension);
         for (k = 0; k < param->dimension; k++) {
             switch(get_genotype(geno->genotype, i, j)) {
                 case HOMO_MAJOR:
-                    a_hess[k*param->dimension + k] -= -4*f*model->coef_q[j];
+                    h_coef = -4*f;
                     break;
                 case HETER:
-                    a_hess[k*param->dimension + k] -= (1-2*f)*2*model->coef_q[j];
+                    h_coef = (1-2*f)*2;
                     break;
                 case HOMO_MINOR:
-                    a_hess[k*param->dimension + k] -= (2-2*f)*2*model->coef_q[j];
+                    h_coef = (2-2*f)*2;
                     break;
             }
+            a_hess[k*param->dimension + k] += h_coef*model->coef_q[j];
         }
       }
 
@@ -510,6 +500,7 @@ void spa_sub_optimize(spa_model *model,
       bound = obj + param->alpha * t *
                     vector_inner_product(a_grad, ad, param->dimension);
 
+      // backtracking line-search
       while(objt > bound) {
         t = t * param->beta;
         vector_add_to_new(atmp, pt, ad, t, param->dimension);
@@ -517,6 +508,7 @@ void spa_sub_optimize(spa_model *model,
         objt = spa_sub_objective(model, geno, param, i, LOCT_ONLY);
         bound = obj + param->alpha * t *
                       vector_inner_product(a_grad, ad, param->dimension);
+
       }
 
       vector_copy(pt, atmp, param->dimension);
