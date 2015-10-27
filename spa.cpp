@@ -26,7 +26,7 @@ void exit_with_help() {
   printf(
   "Usage: spa [options]\n"
   "options: \n"
-  "--bfild bed_prefix : prefix of .bed, .bim and .fam file\n"
+  "--bfile bed_prefix : prefix of .bed, .bim and .fam file\n"
   "--pfile ped_prefix : prefix of .ped and .map file\n"
   "--tfile tped_prefix : prefix of .tped and .tfam file\n"
   "--gfile genotype_file : genotype file\n"
