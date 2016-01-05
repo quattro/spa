@@ -5,6 +5,9 @@
 #include "spa_io.h"
 #include "spa_util.h"
 
+#include <mkl.h>
+
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -14,10 +17,12 @@
 
 using std::string;
 using std::map;
+using std::max;
 
 // system macro
 #define Malloc(type,n) (type *)malloc((n)*sizeof(type))
 #define MAX_DIMENSION 3
+#define Z_DIMENSION (MAX_DIMENSION + 2)
 #define MAX_GENERATION 2
 #define MAX_MESSAGE 1024
 #define MAX_LINE_INIT 1024
@@ -34,15 +39,15 @@ void exit_with_help() {
   "--location-input location_file : known locations\n"
   "--model-input model_file : known slope functions\n"
   "--location-output location_file : output file for individual locations\n"
-  "--model-output model_file: output file for slope function coefficients" 
-    "and SPA score\n"
+  "--model-output model_file: output file for function coefficients," 
+    "SPA score, and log-likelihood\n"
   "-n generation: number of locations\n"
   "-k dimesion : dimensions of spatial analysis\n"
   "-e epsilon : set tolerance of termination criterion (default 0.01)\n"
   "-r tradeoff : set optimization epsilon tolerance (default 1e-6)."
     "Larger value makes the program run faster but poor accuracy\n"
   "-v verbose : verbose level\n"
-  "-t thread_num : number of thread\n"
+  "-t thread_num : number of threads to use for parallel processing.\n"
   );
   exit(1);
 }
@@ -50,9 +55,10 @@ void exit_with_help() {
 void print_version_information() {
   printf(
 "@----------------------------------------------------------@\n"
-"|         SPA!       |      v1.13      |    4/APR/2012     |\n"
+"|         SPAQ!       |      v1.00      |    1/JAN/2016    |\n"
 "|----------------------------------------------------------|\n"
-"|  (C) 2012 Wen-Yun Yang, GNU General Public License, v2   |\n"
+"|  (C) 2016 Nicholas Mancuso, Wen-Yun Yang,                |\n"
+"|                         GNU General Public License, v2   |\n" 
 "|----------------------------------------------------------|\n"
 "|  For documentation, citation & bug-report instructions:  |\n"
 "|             http://genetics.cs.ucla.edu/spa/             |\n"
@@ -64,18 +70,15 @@ void print_version_information() {
 // IO variables
 char* line = NULL;
 int max_line_len = 1024;
-static int* indx;  // less than 10 dimensions Newton's method
 static char* error_buffer;
 
 void initialize() {
-  indx = Malloc(int, MAX_DIMENSION);
   error_buffer = Malloc(char, MAX_MESSAGE);
   max_line_len = MAX_LINE_INIT;
   line = Malloc(char, max_line_len);
 }
 
 void finalize() {
-  free(indx);
   free(error_buffer);
   free(line);
 }
@@ -94,7 +97,7 @@ void set_default_parameter(spa_parameter *param) {
   // default parameters
   param->generation = 1;
   param->dimension = 2;
-  param->max_iter = 1000;
+  param->max_iter = 100;
   param->step_epsilon = 0.01;
   param->max_sub_iter = 100;
   param->alpha = 0.01;
@@ -219,7 +222,7 @@ void spa_optimize(spa_model *model,
     old_x = Malloc(double, geno->n_individual * param->dimension);
   
     for(iter = 0; iter < param->max_iter; iter++) {
-      #pragma parallel for private(i) num_threads(model->num_threads)
+      #pragma omp parallel for private(i) num_threads(param->thread_num)
       for(i = 0; i < geno->n_snp; i++) {
         spa_sub_optimize(model, geno, param, i, COEF_ONLY);
       }
@@ -231,11 +234,10 @@ void spa_optimize(spa_model *model,
                                   old_x, 
                                   geno->n_individual * param->dimension));
   
-      #pragma parallel for private(i) num_threads(model->num_threads)
+      #pragma omp parallel for private(i) num_threads(param->thread_num)
       for(i = 0; i < geno->n_individual; i++) {
         switch(param->dimension) {
           case PLANE:
-              printf("%d\n", i);
             spa_sub_optimize(model, geno, param, i, LOCT_ONLY);
             break;
           case GLOBE:
@@ -265,14 +267,13 @@ void spa_optimize(spa_model *model,
   
     free(old_x);
   } else if (mode == COEF_ONLY)  {
-    #pragma parallel for private(i) num_threads(model->num_threads)
+    #pragma omp parallel for private(i) num_threads(param->thread_num)
     for(i = 0; i < geno->n_snp; i++) {
-      printf("%d\n", i);
       spa_sub_optimize(model, geno, param, i, COEF_ONLY);
     }
   } else if (mode == LOCT_ONLY) {
     initialize_random_location(model, geno, param);    
-    #pragma parallel for private(i) num_threads(model->num_threads)
+    #pragma omp parallel for private(i) num_threads(param->thread_num)
     for(i = 0; i < geno->n_individual; i++) {
       switch(param->dimension) {
         case PLANE:
@@ -301,31 +302,45 @@ void spa_sub_optimize(spa_model *model,
                       const int mode) {
   int j;
   int k;
+  int l;
   int iter;
-  double a_grad[MAX_DIMENSION];
-  double a_hess[MAX_DIMENSION * MAX_DIMENSION];
+  double z[Z_DIMENSION];
+  double y[Z_DIMENSION];
+  double a_grad[Z_DIMENSION];
+  double a_hess[Z_DIMENSION * Z_DIMENSION];
   double b_grad;
   double b_hess;
   double q_grad;
   double q_hess;
-  double gradproj[MAX_DIMENSION];
+  double gradproj[Z_DIMENSION];
 
 
-  double ad[MAX_DIMENSION], bd, qd;
-  double atmp[MAX_DIMENSION], htmp[MAX_DIMENSION * MAX_DIMENSION];
+  double ad[Z_DIMENSION], bd, qd;
+  double atmp[Z_DIMENSION], htmp[Z_DIMENSION * Z_DIMENSION];
   double *pt;
+  double *pa;
   double pb;
   double pq;
   double xsqrd, g_coef, h_coef;
+  int hdim, gdim;
 
-  double f, lambda, t, obj, objt, bound;
+  double f, lambda, t, obj, objt, lobj, bound;
+  lobj = 0.0;
 
   if(mode == COEF_ONLY) {
     // optimize q[i] a[i] b[i] 
-    pt = model->coef_a[i];
+    gdim = param->dimension + 2;
+    hdim = gdim * gdim;
+
+
+    pt = y; //model->coef_a[i];
     for(iter = 0; iter < param->max_sub_iter; iter++) {  
-      vector_init(a_grad, param->dimension, 0); 
-      vector_init(a_hess, param->dimension*param->dimension, 0); 
+      y[0] = model->coef_q[i];
+      memcpy(&y[1], model->coef_a[i], sizeof(double)*param->dimension);
+      y[gdim - 1] = model->coef_b[i];
+
+      vector_init(a_grad, gdim, 0); 
+      vector_init(a_hess, hdim, 0); 
 
       b_grad = 0;
       b_hess = 0;
@@ -334,13 +349,18 @@ void spa_sub_optimize(spa_model *model,
       
       // compute gradient and Hessian
       for(j = 0; j < geno->n_individual; j++) {
+#ifdef OLD
+        xsqrd = 0.0;
+#else
         xsqrd = vector_inner_product(model->x[j], model->x[j], param->dimension);
-        f = 1 / (1 + exp(- vector_inner_product(model->coef_a[i],
-                                                model->x[j],
-                                                param->dimension) 
-                         - model->coef_b[i] - (model->coef_q[i] * xsqrd)));
+#endif
+        z[0] = xsqrd;
+        memcpy(&z[1], model->x[j], sizeof(double) * param->dimension);
+        z[gdim - 1] = 1.0;
 
-        vector_out_product(htmp, model->x[j], param->dimension);
+        f = 1 / (1 + exp(- vector_inner_product(y, z, gdim))); 
+        vector_out_product(htmp, z, gdim);
+
         switch(get_genotype(geno->genotype, j, i)) {
           case HOMO_MAJOR:
             g_coef = 2*f;
@@ -355,39 +375,18 @@ void spa_sub_optimize(spa_model *model,
             break;
         }
 
-        vector_add(a_grad, model->x[j], g_coef, param->dimension);
-        b_grad += g_coef;
-        q_grad += g_coef*xsqrd;
-
+        vector_add(a_grad, z, g_coef, gdim);
         h_coef = 2 * f * (1 - f);
-        vector_add(a_hess, htmp, h_coef, param->dimension*param->dimension);
-        b_hess += h_coef;
-        q_hess += h_coef * (xsqrd * xsqrd);
+        vector_add(a_hess, htmp, h_coef, hdim);
       }
       
       // test termination
-      vector_copy(ad, a_grad, param->dimension);
-      lusolv(a_hess, param->dimension, ad, param);
-      vector_scale(ad, -1, param->dimension);
+      vector_copy(ad, a_grad, gdim);
+      mod_chol_solv(a_hess, gdim, ad, param);
+      vector_scale(ad, -1, gdim);
 
-      // step directions for b and q
-      if(b_hess > 0) {
-        bd = - b_grad / b_hess;
-      } else {
-        bd = - b_grad;
-      }
-
-      if(q_hess > 0) {
-        qd = - q_grad / q_hess;
-      } else {
-        qd = - q_grad;
-      }
-      lambda = (- vector_inner_product(a_grad, ad, param->dimension) 
-                - bd * b_grad - qd * q_grad) 
-               / geno->n_individual;
-      
-      if(lambda < param->epsilon)
-        break;
+      // if the step direction is small--stop
+      lambda = -vector_inner_product(a_grad, ad, gdim) / geno->n_individual;
 
       // line search
       obj = spa_sub_objective(model, geno, param, i, COEF_ONLY);
@@ -398,43 +397,49 @@ void spa_sub_optimize(spa_model *model,
         t = 1;
       }
 
-      model->coef_a[i] = atmp;
-      vector_add_to_new(atmp, pt, ad, t, param->dimension);
-      pb = model->coef_b[i];
+      pa = model->coef_a[i];
       pq = model->coef_q[i];
-      model->coef_b[i] = pb + bd * t;
-      model->coef_q[i] = pq + qd * t;
-      
+      pb = model->coef_b[i];
+      vector_add_to_new(atmp, pt, ad, t, gdim);
+      // do this so the model stays updated... should just make 1 contiguous block
+      // for all coefficients eventually
+      model->coef_a[i] = &atmp[1];
+
       objt = spa_sub_objective(model, geno, param, i, COEF_ONLY);
-      bound = obj + param->alpha * t *
-                    (vector_inner_product(a_grad, ad, param->dimension) + 
-                     bd * b_grad + qd * q_grad);
+      bound = obj + param->alpha * t * vector_inner_product(a_grad, ad, gdim);
 
       while(objt > bound) {
         t = t * param->beta;
-        vector_add_to_new(atmp, pt, ad, t, param->dimension);
-        model->coef_b[i] = pb + bd * t;
-        model->coef_q[i] = pq + qd * t;
+        vector_add_to_new(atmp, pt, ad, t, gdim);
+        model->coef_q[i] = atmp[0];
+        model->coef_b[i] = atmp[gdim - 1];
         objt = spa_sub_objective(model, geno, param, i, COEF_ONLY);
-        bound = obj + param->alpha * t * 
-                      (vector_inner_product(a_grad, ad, param->dimension) + 
-                       bd * b_grad + qd * q_grad);
+        bound = obj + param->alpha * t * vector_inner_product(a_grad, ad, gdim);
       }
 
-      vector_copy(pt, atmp, param->dimension);
-      model->coef_a[i] = pt;
+      model->coef_q[i] = atmp[0];
+      vector_copy(pa, &atmp[1], param->dimension);
+      model->coef_a[i] = pa;
+      model->coef_b[i] = atmp[gdim - 1];
 
       sprintf(line, 
               "Iter %d: objective = %.10f, gradient norm = %.10f",
-              iter,
-              obj,
-              lambda);
+              iter, objt, lambda);
+      if (fabs(objt - lobj) < param->epsilon) {
+          break;
+      } else {
+          lobj = objt;
+          model->llike[i] = -objt;
+      }
       spa_message(line, WORDY, param);
     }
   } else if (mode == LOCT_ONLY) {
-    pt = model->x[i];
-    xsqrd = vector_inner_product(model->x[i], model->x[i], param->dimension);
     for(iter = 0; iter < param->max_sub_iter; iter++) {
+#ifdef OLD
+      xsqrd = 0.0;
+#else
+      xsqrd = vector_inner_product(model->x[i], model->x[i], param->dimension);
+#endif
       vector_init(a_grad, param->dimension, 0); 
       vector_init(a_hess, param->dimension*param->dimension, 0); 
       
@@ -451,35 +456,27 @@ void spa_sub_optimize(spa_model *model,
         switch(get_genotype(geno->genotype, i, j)) {
           case HOMO_MAJOR:
             g_coef = 2*f;
+            h_coef = 4*f;
             break;
           case HETER:
             g_coef = -1+2*f;
+            h_coef = -2+4*f;
             break;
           case HOMO_MINOR:
             g_coef = -2+2*f;
+            h_coef = -4+4*f;
             break;
         }
         vector_add(a_grad, atmp, g_coef, param->dimension);
         vector_add(a_hess, htmp, 2*f*(1-f), param->dimension*param->dimension);
         for (k = 0; k < param->dimension; k++) {
-            switch(get_genotype(geno->genotype, i, j)) {
-                case HOMO_MAJOR:
-                    h_coef = -4*f;
-                    break;
-                case HETER:
-                    h_coef = (1-2*f)*2;
-                    break;
-                case HOMO_MINOR:
-                    h_coef = (2-2*f)*2;
-                    break;
-            }
             a_hess[k*param->dimension + k] += h_coef*model->coef_q[j];
         }
       }
 
       // test termination
       vector_copy(ad, a_grad, param->dimension);
-      lusolv(a_hess, param->dimension, ad, param);
+      mod_chol_solv(a_hess, param->dimension, ad, param);
       vector_scale(ad, -1, param->dimension);
 
       lambda = sqrt(- vector_inner_product(a_grad, ad, param->dimension))
@@ -489,11 +486,10 @@ void spa_sub_optimize(spa_model *model,
       }
 
       // line search
+      t = 1.0;
       obj = spa_sub_objective(model, geno, param, i, LOCT_ONLY);
-      
+      pt = model->x[i];
       model->x[i] = atmp;
-      
-      t = 1;
       vector_add_to_new(atmp, pt, ad, t, param->dimension);
       
       objt = spa_sub_objective(model, geno, param, i, LOCT_ONLY);
@@ -504,21 +500,14 @@ void spa_sub_optimize(spa_model *model,
       while(objt > bound) {
         t = t * param->beta;
         vector_add_to_new(atmp, pt, ad, t, param->dimension);
-
         objt = spa_sub_objective(model, geno, param, i, LOCT_ONLY);
-        bound = obj + param->alpha * t *
-                      vector_inner_product(a_grad, ad, param->dimension);
-
+        bound = obj + param->alpha * t * vector_inner_product(a_grad, ad, param->dimension);
       }
 
       vector_copy(pt, atmp, param->dimension);
       model->x[i] = pt;
-  
-      sprintf(line,
-              "Iter %d: objective = %.10f, gradient norm = %.10f",
-              iter,
-              obj,
-              lambda);
+      sprintf(line, "Iter %d: objective = %.10f, gradient norm = %.10f",
+              iter, objt, lambda);
       spa_message(line, WORDY, param);
     }
   } else if(mode == LOCT_GLOBE) {
@@ -638,7 +627,11 @@ double spa_sub_objective(const spa_model *model,
   if(mode == COEF_ONLY) { 
     // for a[i] 
     for(j = 0; j < geno->n_individual; j++) {
+#ifdef OLD
+      xsqrd = 0.0;
+#else
       xsqrd = vector_inner_product(model->x[j], model->x[j], param->dimension);
+#endif
       f = vector_inner_product(model->coef_a[i],
                                model->x[j],
                                param->dimension) + 
@@ -663,8 +656,12 @@ double spa_sub_objective(const spa_model *model,
     }
   } else if(mode == LOCT_ONLY) {
     // for x[i] 
+#ifdef OLD
+    xsqrd = 0.0;
+#else
+    xsqrd = vector_inner_product(model->x[i], model->x[i], param->dimension);
+#endif
     for(j = 0; j < geno->n_snp; j++) {
-      xsqrd = vector_inner_product(model->x[i], model->x[i], param->dimension);
       f = vector_inner_product(model->coef_a[j],
                                model->x[i],
                                param->dimension) + 
@@ -699,18 +696,23 @@ double spa_sub_objective_admixed(const spa_model *model,
 {
   int j;
   double objective = 0.0;
-  double f, m;
-  
+  double f, m, xsqrd1, xsqrd2;
+#ifdef OLD  
+  xsqrd1 = 0.0;
+  xsqrd2 = 0.0;
+#else
+  xsqrd1 = vector_inner_product(model->x[i], model->x[i], param->dimension);
+  xsqrd2 = vector_inner_product(model->x[i] + param->dimension, model->x[i] + param->dimension, param->dimension);
+#endif
   for(j = 0; j < geno->n_snp; j++) {
     f = 1 / (1 + exp( - vector_inner_product(model->coef_a[j],
-                                             model->x[i],
-                                             param->dimension) 
-                      - model->coef_b[j]));
+                                             model->x[i], param->dimension) 
+                         - model->coef_b[j] - (model->coef_q[j] * xsqrd1)));
 
     m = 1 / (1 + exp( - vector_inner_product(model->coef_a[j],
                                              model->x[i] + param->dimension, 
                                              param->dimension) 
-                      - model->coef_b[j]));
+                         - model->coef_b[j] - (model->coef_q[j] * xsqrd2)));
     
     switch(get_genotype(geno->genotype, i, j)) {
       case HOMO_MAJOR:
@@ -736,6 +738,7 @@ void spa_sub_optimize_admixed(spa_model *model,
                               const int n_trial) {
   int j, trial, iter;
   double grad[MAX_DIMENSION * PARENT];
+  double atmp[MAX_DIMENSION * PARENT];
 
   double xd[MAX_DIMENSION * PARENT];
   double xtmp[MAX_DIMENSION * PARENT];
@@ -743,51 +746,53 @@ void spa_sub_optimize_admixed(spa_model *model,
   double *pt;
 
   double f, m, lambda, t, obj, objt, bound, min_obj;
+  double xsqrd1, xsqrd2;
+  double pcoef, mcoef;
   
   pt = model->x[i];
   min_obj = INF;
   for(trial = 0; trial < n_trial; trial++) {
     for(iter = 0; iter < param->max_sub_iter; iter++) {  
       vector_init(grad, param->dimension * param->generation, 0); 
+      vector_init(atmp, param->dimension * param->generation, 0); 
 
       // compute gradient
+#ifdef OLD
+      xsqrd1 = 0.0;
+      xsqrd2 = 0.0;
+#else
+      xsqrd1 = vector_inner_product(model->x[i], model->x[i], param->dimension);
+      xsqrd2 = vector_inner_product(model->x[i] + param->dimension, model->x[i] + param->dimension, param->dimension);
+#endif
+      vector_add_to_new(atmp, model->coef_a[j], model->x[i], 2 * model->coef_q[j], param->dimension);
+      vector_add_to_new(atmp + param->dimension, model->coef_a[j], model->x[i] + param->dimension, 2 * model->coef_q[j], param->dimension);
       for(j = 0; j < geno->n_snp; j++) {
         f = 1 / (1 + exp(- vector_inner_product(model->coef_a[j], 
                                                 model->x[i],
                                                 param->dimension) 
-                         - model->coef_b[j]));
+                         - model->coef_b[j] - (model->coef_q[j] * xsqrd1)));
 
         m = 1 / (1 + exp(- vector_inner_product(model->coef_a[j], 
                                                 model->x[i] + param->dimension,
                                                 param->dimension) 
-                         - model->coef_b[j]));
+                         - model->coef_b[j] - (model->coef_q[j] * xsqrd2)));
         
         switch(get_genotype(geno->genotype, i, j)) {
           case HOMO_MAJOR:
-            vector_add(grad, model->coef_a[j], f, param->dimension);
-            vector_add(grad + param->dimension, 
-                       model->coef_a[j], 
-                       m, 
-                       param->dimension);
+            pcoef = f;
+            mcoef = m;
             break;
           case HETER:
-            vector_add(grad, 
-                       model->coef_a[j],
-                       -(1-2*m)*(1-f)*f/(f*(1-m)+m*(1-f)),
-                       param->dimension);
-            vector_add(grad + param->dimension,
-                       model->coef_a[j],
-                       -(1-2*f)*(1-m)*m/(f*(1-m)+m*(1-f)),
-                       param->dimension);
+            pcoef = -(1-2*m)*(1-f)*f/(f*(1-m)+m*(1-f));
+            mcoef = -(1-2*f)*(1-m)*m/(f*(1-m)+m*(1-f));
             break;
           case HOMO_MINOR:
-            vector_add(grad, model->coef_a[j], -1+f, param->dimension);
-            vector_add(grad + param->dimension,
-                       model->coef_a[j],
-                       -1+m,
-                       param->dimension);
+            pcoef = -1 + f;
+            mcoef = -1 + m;
             break;
         }
+        vector_add(grad, atmp, pcoef, param->dimension);
+        vector_add(grad + param->dimension, atmp + param->dimension, mcoef, param->dimension);
       }
 
       // test termination
@@ -833,7 +838,7 @@ void spa_sub_optimize_admixed(spa_model *model,
       sprintf(line,
               "Iter %d: objective = %.10f, gradient norm = %.10f",
               iter,
-              obj,
+              objt,
               lambda);
 
       spa_message(line, WORDY, param);
@@ -846,64 +851,35 @@ void spa_sub_optimize_admixed(spa_model *model,
   vector_copy(model->x[i], min_x, param->dimension * param->generation);
 }
 
-void lusolv(double *a, int n, double *b, const spa_parameter *param)
+void mod_chol_solv(double *a, int n, double *b, const spa_parameter *param)
 {
-  int d;
+  int k;
   int i, j;
+  int dim;
   int flag;
-  double htmp[MAX_DIMENSION * MAX_DIMENSION];
-  double I[MAX_DIMENSION * MAX_DIMENSION];
-  double norm;
-  double tau;
-  double minval;
-  double val;
+  int indx[MAX_DIMENSION];
 
-  flag = ludcmp(a, n, indx, &d);
-
-  if(flag) {
-    // if singular, just use gradient
-    lubksb(a, n, indx, b);
-  } else {
-    // algorithm 6.3 from Numerical Opt Nocedal,Wright 1999
-    eye(I, n);
-    norm = 0.0;
-    minval = 1e37;
-    for (i = 0; i < n; i++) {
-        for (j = 0; j < n; j++) {
-            val = a[i*n + j];
-            norm += val * val;
-            if (i == j) {
-                if (val < minval)
-                    minval = val;
-                htmp[i*n + i] = 1.0;
-            } else {
-                htmp[i*n + i] = 0.0;
-            }
-        }
-    }
-    if (minval > 0.0) {
-        tau = 0.0;
-    } else {
-        tau = minval;
-    }
-    while (true) {
-        vector_add(htmp, I, tau, n * n);
-        vector_add(a, htmp, 1.0, n * n);
-
-        flag = ludcmp(a, n, indx, &d);
-        if (flag) {
-            lubksb(a, n, indx, b);
-            break;
-        }
-        if ( 2 * tau > norm / 2.0) {
-            tau = 2 * tau;
-        } else {
-            tau = norm / 2.0;
-        }
-    }
-    vector_copy(a, htmp, n * n);
-    spa_message("singular hessian! Switch to gradient descent", WORDY, param);
+  double tau = 0.0;
+  double beta = 0.0;
+  dim = n;
+  
+  for (i = 0; i < dim; i++) {
+      for (j = 0; j < dim; j++) {
+          beta += a[i + dim * j] * a[i + dim * j];
+      }
   }
+  beta = sqrt(beta) / 20;
+
+  flag = 1;
+  while (flag) {
+    memset(indx, 0, sizeof(int) * MAX_DIMENSION);
+    for (i = 0; i < dim; i++) {
+        a[i + dim * i] += tau;
+    }
+    flag = LAPACKE_dpotrf(LAPACK_ROW_MAJOR, 'U', dim, a, dim);
+    tau = max(2 * tau, beta / 2);
+  }
+  LAPACKE_dpotrs(LAPACK_ROW_MAJOR, 'U', dim, 1, a, dim, b, 1);
 }
 
 void spa_selection(const spa_model *model,
@@ -916,7 +892,11 @@ void spa_selection(const spa_model *model,
 
   for(i = 0; i < model->n_snp; i++) {
     for(j = 0; j < model->n_individual; j++) {
+#ifdef OLD
+      xsqrd = 0.0;
+#else
       xsqrd = vector_inner_product(model->x[j], model->x[j], param->dimension);
+#endif
       tmp[j] =
           1 / (1 + exp(- vector_inner_product(model->coef_a[i],
                                                 model->x[j],
@@ -1299,14 +1279,14 @@ void check_snp_valid(const spa_data* geno,
       continue;
     }
 
-    // might have strand problem, remove
+    /* might have strand problem, remove
     if ((snp_info.snp_major == 'G' && snp_info.snp_minor == 'C') ||
         (snp_info.snp_major == 'C' && snp_info.snp_minor == 'G') ||
         (snp_info.snp_major == 'A' && snp_info.snp_minor == 'T') ||
         (snp_info.snp_major == 'T' && snp_info.snp_minor == 'A')) {
       is_valid[i] = false;
       continue;
-    }
+    }*/
 
     // inconsistent alleles with genotyep data, remove
     snp_info_struct& g_snp_info = geno->snp_info[geno_key[key]];
@@ -1523,6 +1503,7 @@ void allocate_model_coef(spa_model *model,
   model->coef_b = Malloc(double, model->n_snp);
   model->coef_q = Malloc(double, model->n_snp);
   model->score = Malloc(double, model->n_snp);
+  model->llike = Malloc(double, model->n_snp);
   vector_init(model->coef_a_space, model->n_snp * param->dimension, 0);  
   vector_init(model->coef_b, model->n_snp, 0);
   vector_init(model->coef_q, model->n_snp, 0);
@@ -1548,6 +1529,7 @@ void free_model(const spa_model *model) {
   free(model->coef_q);
   free(model->x);
   free(model->score);
+  free(model->llike);
 
   for(i = 0; i < model->n_individual; i++) {
     free_individual_info(model->individual_info + i);

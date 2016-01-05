@@ -65,7 +65,7 @@ void spa_sub_optimize_admixed(spa_model* model,
                               const int n_trial);
 
 // numerical functions
-void lusolv(double* a, int n, double* b, const spa_parameter* param);
+void mod_chol_solv(double* a, int n, double* b, const spa_parameter* param);
 
 // private functions
 void copy_info(spa_model* model, const spa_data* geno, const int mode);

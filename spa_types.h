@@ -102,6 +102,7 @@ struct spa_model {
   double* x_space;
 
   double* score;
+  double* llike;
 };
 
 struct spa_data {

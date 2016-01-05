@@ -3,15 +3,6 @@
 #pragma once
 
 /* *
- * numerical functions 
- * */
-
-// back substitution using LU decomposition
-void lubksb(double* a, int n, int* indx, double* b);
-// LU decomposition
-int ludcmp(double* a, int n, int* indx, int* d);
-
-/* *
  * vector operation functions
  * */
 
