@@ -429,7 +429,6 @@ void spa_sub_optimize(spa_model *model,
           break;
       } else {
           lobj = objt;
-          model->llike[i] = -objt;
       }
       spa_message(line, WORDY, param);
     }
@@ -654,6 +653,7 @@ double spa_sub_objective(const spa_model *model,
           break;
       }
     }
+    model->llike[i] = -objective;
   } else if(mode == LOCT_ONLY) {
     // for x[i] 
 #ifdef OLD
@@ -737,20 +737,21 @@ void spa_sub_optimize_admixed(spa_model *model,
                               const int i,
                               const int n_trial) {
   int j, trial, iter;
-  double grad[MAX_DIMENSION * PARENT];
-  double atmp[MAX_DIMENSION * PARENT];
+  double grad[Z_DIMENSION * PARENT];
+  double atmp[Z_DIMENSION * PARENT];
 
-  double xd[MAX_DIMENSION * PARENT];
-  double xtmp[MAX_DIMENSION * PARENT];
-  double min_x[MAX_DIMENSION * PARENT];
+  double xd[Z_DIMENSION * PARENT];
+  double xtmp[Z_DIMENSION * PARENT];
+  double min_x[Z_DIMENSION * PARENT];
   double *pt;
 
-  double f, m, lambda, t, obj, objt, bound, min_obj;
+  double f, m, lambda, t, oldobj, obj, objt, bound, min_obj;
   double xsqrd1, xsqrd2;
   double pcoef, mcoef;
   
   pt = model->x[i];
   min_obj = INF;
+  oldobj = min_obj;
   for(trial = 0; trial < n_trial; trial++) {
     for(iter = 0; iter < param->max_sub_iter; iter++) {  
       vector_init(grad, param->dimension * param->generation, 0); 
@@ -764,8 +765,6 @@ void spa_sub_optimize_admixed(spa_model *model,
       xsqrd1 = vector_inner_product(model->x[i], model->x[i], param->dimension);
       xsqrd2 = vector_inner_product(model->x[i] + param->dimension, model->x[i] + param->dimension, param->dimension);
 #endif
-      vector_add_to_new(atmp, model->coef_a[j], model->x[i], 2 * model->coef_q[j], param->dimension);
-      vector_add_to_new(atmp + param->dimension, model->coef_a[j], model->x[i] + param->dimension, 2 * model->coef_q[j], param->dimension);
       for(j = 0; j < geno->n_snp; j++) {
         f = 1 / (1 + exp(- vector_inner_product(model->coef_a[j], 
                                                 model->x[i],
@@ -776,6 +775,9 @@ void spa_sub_optimize_admixed(spa_model *model,
                                                 model->x[i] + param->dimension,
                                                 param->dimension) 
                          - model->coef_b[j] - (model->coef_q[j] * xsqrd2)));
+
+        vector_add_to_new(atmp, model->coef_a[j], model->x[i], 2 * model->coef_q[j], param->dimension);
+        vector_add_to_new(atmp + param->dimension, model->coef_a[j], model->x[i] + param->dimension, 2 * model->coef_q[j], param->dimension);
         
         switch(get_genotype(geno->genotype, i, j)) {
           case HOMO_MAJOR:
@@ -799,14 +801,6 @@ void spa_sub_optimize_admixed(spa_model *model,
       vector_copy(xd, grad, param->dimension * param->generation);
       vector_scale(xd, -1, param->dimension * param->generation);
 
-      lambda = 
-        sqrt(-vector_inner_product(grad, 
-                                   xd, 
-                                   param->dimension * param->generation));
-      
-      if(lambda < param->epsilon)
-        break;
-
       // line search
       obj = spa_sub_objective_admixed(model, geno, param, i);
       model->x[i] = xtmp;
@@ -815,23 +809,15 @@ void spa_sub_optimize_admixed(spa_model *model,
       vector_add_to_new(xtmp, pt, xd, t, param->dimension * param->generation);
       
       objt = spa_sub_objective_admixed(model, geno, param, i);
-      bound = obj + param->alpha * 
-                    t * 
-                    vector_inner_product(grad, 
-                                         xd,
-                                         param->dimension * param->generation);
+      bound = obj + param->alpha * t * vector_inner_product(grad, xd, param->dimension * param->generation);
       
       while(objt > bound) {
         t = t * param->beta;
         vector_add_to_new(xtmp, pt, xd, t, param->dimension * param->generation);
-
         objt = spa_sub_objective_admixed(model, geno, param, i);
-        bound = obj + param->alpha * 
-                      t * 
-                      vector_inner_product(grad,
-                                           xd,
-                                           param->dimension * param->generation);
+        bound = obj + param->alpha * t * vector_inner_product(grad, xd, param->dimension * param->generation);
       }
+      obj = objt;
       vector_copy(pt, xtmp, param->dimension * param->generation);
       model->x[i] = pt;
       
@@ -842,6 +828,11 @@ void spa_sub_optimize_admixed(spa_model *model,
               lambda);
 
       spa_message(line, WORDY, param);
+      if (fabs(obj - oldobj) < param->epsilon) {
+          break;
+      } else {
+           oldobj = obj;
+      }
     }
     if (obj < min_obj) {
       min_obj = obj;
